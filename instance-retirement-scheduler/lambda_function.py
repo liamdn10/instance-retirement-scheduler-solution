@@ -2,20 +2,18 @@ import json
 import boto3
 import sys
 import os
-
-
-try:
-    ec2_client = boto3.client('ec2')
-except Exception as e:
-    print("ERROR: failed to connect to EC2")
-    error_notification(e)
-    sys.exit(1)
     
 try:
     sns_client = boto3.client('sns')
 except Exception as e:
     print("ERROR: failed to connect to SNS")
-    error_notification(e)
+    sys.exit(1)
+
+try:
+    ec2_client = boto3.client('ec2')
+except Exception as e:
+    print("ERROR: failed to connect to EC2")
+    sns_notification(e)
     sys.exit(1)
     
 SNS_TOPIC_ARN = os.environ.get('sns_topic_arn')
@@ -69,7 +67,7 @@ def retirement(instances):
     except Exception as e:
         print("ERROR: failed to stop EC2 instances")
         print(e)
-        error_notification(e)
+        sns_notification(e)
 
     while len(instances) != 0:
         
@@ -86,7 +84,7 @@ def retirement(instances):
                 except Exception as e:
                     print("ERROR: failed to start EC2 instances " + instance)
                     print(e)
-                    error_notification(e)
+                    sns_notification(e)
                     after_retirement(instance, 'failed')
                     instances.remove(instance)
                     
@@ -108,10 +106,10 @@ def after_retirement(instance_id, status:str):
     except Exception as e:
         print("ERROR: failed to add tags to EC2")
         print(e)
-        error_notification(e)
+        sns_notification(e)
         sys.exit(1)
 
-def error_notification(e):
+def sns_notification(e):
     sns_client.publish(
         TopicArn=SNS_TOPIC_ARN,
         Message=str(e),
@@ -130,6 +128,7 @@ def lambda_handler(event, context):
         }
     else: 
         retirement(instances)
+        sns_notification("instance scheduler successed")
     
     return {
         'statusCode': 200,
