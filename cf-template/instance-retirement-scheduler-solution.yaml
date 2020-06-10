@@ -8,7 +8,7 @@
 #     - 2 policy for lambba invoke role
 # =============================================
 # Date: 2020/05/23 11:28
-# Version: 0.1
+# Version: 0.2
 # =============================================
 # Author: Lam-Dao-Ngoc
 # Student at University of Engineering and Technology (UET - VNU) (08/2016-12/2020)
@@ -160,14 +160,81 @@ Resources:
     Properties:
       FunctionName: !Sub ${ProjectPrefix}-Get-Retirement-Instance-Function
       Code:
-        S3Bucket: 'liamdao-cf'
-        S3Key: 'solutions/instance-retirement-scheduler/get-retirement-instance.zip'
+        ZipFile: |
+          import json
+          import boto3
+          import sys
+          import os
+
+
+          try:
+              sns_client = boto3.client('sns')
+          except Exception as e:
+              print("ERROR: failed to connect to SNS")
+              sys.exit(1)
+
+          try:
+              ec2_client = boto3.client('ec2')
+          except Exception as e:
+              print("ERROR: failed to connect to EC2")
+              sys.exit(1)
+
+          SNS_TOPIC_ARN = os.environ.get('sns_topic_arn')
+          MAINTENANCE_WINDOW = os.environ.get('maintenance_window')
+
+          def retirement_notification(resources):
+            message = 'instaces ' + str(resources) + ' will be retirement at DAY-HOUR-MINUTE: ' + MAINTENANCE_WINDOW
+            
+            try:
+                sns_client.publish(
+                    TopicArn=SNS_TOPIC_ARN,
+                      Message=str(message),
+                      Subject='Instance retirement scheduler'
+                  )
+            except Exception as e:
+              print(e)
+              sys.exit(1)
+
+          def update_retirement_tag(resources):
+              try:
+                  ec2_client.create_tags(
+                      Resources = resources,
+                      Tags = [
+                          {
+                              'Key': 'retirement_scheduled',
+                              'Value': 'scheduled'
+                          }
+                      ]
+                  )
+              except Exception as e:
+                  print("ERROR: failed to add tags to EC2")
+                  print(e)
+                  sys.exit(1)
+              
+
+          def lambda_handler(event, context):
+              # TODO implement
+              
+              eventTypeCode = event['detail']['eventTypeCode']
+              if eventTypeCode == 'AWS_EC2_INSTANCE_RETIREMENT_SCHEDULED':
+                  resources = event['resources']
+                  update_retirement_tag(resources)
+                  retirement_notification(resources)
+
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('SUCCESSED: retirement instance scheduled')
+              }
       Description: Lambda function to get retirement instance and add instance-scheduler tag to
-      Handler: 'lambda_function.lambda_handler'
+      Handler: 'index.lambda_handler'
       Timeout: 60
       Role:
         !GetAtt RoleForGetRetirementInstanceFunction.Arn
-      Runtime: 'python3.8'
+      Runtime: 'python3.7'
+      Environment:
+        Variables:
+          sns_topic_arn: !Ref SnsTopic
+          maintenance_window: !Sub ${MaintenanceDayOfWeek}-${MaintenanceHour}-${MaintenanceMinute}
 
   RoleForGetRetirementInstanceFunction:
     Type: AWS::IAM::Role
@@ -196,6 +263,10 @@ Resources:
                 - 'logs:PutLogEvents'
                 - 'logs:CreateLogGroup'
               Resource: 'arn:aws:logs:*:*:*'
+            - Effect: Allow
+              Action: 
+                - 'sns:Publish'
+              Resource: !Ref SnsTopic
 
   InstanceRetirementSchedulerRule:
     Type: AWS::Events::Rule
@@ -225,14 +296,149 @@ Resources:
     Properties:
       FunctionName: !Sub ${ProjectPrefix}-Instance-Retirement-Scheduler-Function
       Code:
-        S3Bucket: 'liamdao-cf'
-        S3Key: 'solutions/instance-retirement-scheduler/instance-retirement-scheduler.zip'
+        ZipFile: |
+          import json
+          import boto3
+          import sys
+          import os
+              
+          try:
+              sns_client = boto3.client('sns')
+          except Exception as e:
+              print("ERROR: failed to connect to SNS")
+              sys.exit(1)
+
+          try:
+              ec2_client = boto3.client('ec2')
+          except Exception as e:
+              print("ERROR: failed to connect to EC2")
+              sns_notification(e)
+              sys.exit(1)
+              
+          SNS_TOPIC_ARN = os.environ.get('sns_topic_arn')
+
+          def get_instance_state(instance_id):
+              
+              # 0 : pending
+              # 16 : running
+              # 32 : shutting-down
+              # 48 : terminated
+              # 64 : stopping
+              # 80 : stopped
+              
+              res = ec2_client.describe_instances(
+                  InstanceIds = [instance_id]
+              )
+              
+              for reservation in res['Reservations']:
+                  for instance in reservation['Instances']:
+                      print(instance['State']['Code'])
+                      return(instance['State']['Code'])
+
+          def before_retirement():
+              instances = []
+              
+              res = ec2_client.describe_instances(
+                  Filters = [
+                      {
+                          'Name': 'tag:retirement_scheduled',
+                          'Values': [
+                              "scheduled"
+                          ]
+                      }
+                  ]
+              )
+              
+              for reservation in res['Reservations']:
+                  for instance in reservation['Instances']:
+                      if instance['State']['Code'] == 16:
+                          instances.append(instance['InstanceId'])
+                      else:
+                          after_retirement(instance['InstanceId'], 'canceled')
+                      
+              return instances
+              
+          def retirement(instances):
+              try:
+                  ec2_client.stop_instances(
+                      InstanceIds = instances
+                  )
+              except Exception as e:
+                  print("ERROR: failed to stop EC2 instances")
+                  print(e)
+                  sns_notification(e)
+
+              while len(instances) != 0:
+                  
+                  for instance in instances:
+                      state = get_instance_state(instance)
+                      if state == 16:
+                          after_retirement(instance, 'unknow')
+                          instances.remove(instance)
+                      elif state == 80:
+                          try:
+                              ec2_client.start_instances(
+                                  InstanceIds = [instance]
+                              )
+                          except Exception as e:
+                              print("ERROR: failed to start EC2 instances " + instance)
+                              print(e)
+                              sns_notification(e)
+                              after_retirement(instance, 'failed')
+                              instances.remove(instance)
+                              
+                          after_retirement(instance, 'successed')
+                          instances.remove(instance)
+              
+          def after_retirement(instance_id, status:str):
+              resources = [instance_id]
+              try:
+                  ec2_client.create_tags(
+                      Resources = resources,
+                      Tags = [
+                          {
+                              'Key': 'retirement_scheduled',
+                              'Value': status
+                          }
+                      ]
+                  )
+              except Exception as e:
+                  print("ERROR: failed to add tags to EC2")
+                  print(e)
+                  sns_notification(e)
+                  sys.exit(1)
+
+          def sns_notification(e):
+              sns_client.publish(
+                  TopicArn=SNS_TOPIC_ARN,
+                  Message=str(e),
+                  Subject='Instance retirement scheduler'
+              )
+              
+          def lambda_handler(event, context):
+              # TODO implement
+              
+              instances = before_retirement()
+              print(instances)
+              if len(instances) == 0:
+                  return {
+                  'statusCode': 200,
+                  'body': json.dumps('there is no instance retirement scheduled')
+                  }
+              else: 
+                  retirement(instances)
+                  sns_notification("instance scheduler successed")
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('instance retirement scheduled successed')
+              }
       Description: Lambda function to automaticaly stop/start retirement instance
-      Handler: 'lambda_function.lambda_handler'
+      Handler: 'index.lambda_handler'
       Timeout: 600
       Role:
         !GetAtt RoleForInstanceRetirementSchedulerFunction.Arn
-      Runtime: 'python3.8'
+      Runtime: 'python3.7'
       Environment:
         Variables:
           sns_topic_arn: !Ref SnsTopic
