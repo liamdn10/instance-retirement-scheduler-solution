@@ -94,4 +94,9 @@ The template will create the resources below:
 
 #### Note
 - You can create an alarm for notification if an error occured to your lambda function
-- If lambda sources stored in S3, rename the S3Bucket and S3Key to your sources.
+- If lambda sources stored in S3, rename the S3Bucket and S3Key to your sources. For example:
+```yaml
+Code:
+  S3Bucket: 'bucket-name'
+  S3Key: 'path/instance-retirement-scheduler.zip'
+```
