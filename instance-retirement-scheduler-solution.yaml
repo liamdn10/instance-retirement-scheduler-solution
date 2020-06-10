@@ -1,0 +1,274 @@
+#   This is AWS CloudFormation template for instance retirement scheduler solution
+#   Alarm include:
+#     - 1 schedule rule
+#     - 1 event rule
+#     - 2 lambda invoke permission
+#     - 2 lambda function
+#     - 2 role for lambda function
+#     - 2 policy for lambba invoke role
+# =============================================
+# Date: 2020/05/23 11:28
+# Version: 0.1
+# =============================================
+# Author: Lam-Dao-Ngoc
+# Student at University of Engineering and Technology (UET - VNU) (08/2016-12/2020)
+# AWS Solution Architech Associate (03/2019 - 03/2022)
+# Location: Hanoi, Vietnam
+# Github: https://github.com/liamhubian
+# LinkedIn: https://www.linkedin.com/in/lamdn8/
+# =============================================
+
+AWSTemplateFormatVersion: 2010-09-09
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      -
+        Label:
+          default: Information configure
+        Parameters:
+          - ProjectPrefix
+          - SnsTopic
+          - State
+      - 
+        Label:
+          default: Maintenance Window
+        Parameters:
+          - MaintenanceHour
+          - MaintenanceMinute
+          - MaintenanceDayOfWeek
+
+Parameters:
+  ProjectPrefix:
+    Description: Project prefix for creating resource name like ${ProjectPrefix}-resourceName
+    Default: Project
+    Type: String
+  SnsTopic:
+    Description: SNS topic to notification if got any error
+    Default: arn:aws:sns:xx:xx:xx
+    Type: String
+  MaintenanceHour:
+    Description: 'Time at hour to start retirement schedule by GMT TimeZone'
+    Default: '17'
+    AllowedValues:
+      - '0'
+      - '1'
+      - '2'
+      - '3'
+      - '4'
+      - '5'
+      - '6'
+      - '7'
+      - '8'
+      - '9'
+      - '10'
+      - '11'
+      - '12'
+      - '13'
+      - '14'
+      - '15'
+      - '16'
+      - '17'
+      - '18'
+      - '19'
+      - '20'
+      - '21'
+      - '22'
+      - '23'
+    Type: String
+  MaintenanceMinute:
+    Description: Time at minute to start retirement schedule by GMT TimeZone
+    Default: '0'
+    AllowedValues:
+      - '0'
+      - '5'
+      - '10'
+      - '15'
+      - '20'
+      - '25'
+      - '30'
+      - '35'
+      - '40'
+      - '45'
+      - '50'
+      - '55'
+    Type: String
+  MaintenanceDayOfWeek:
+    Description: Day in week to start retirement schedule by GMT TimeZone
+    Default: SAT
+    AllowedValues:
+      - MON
+      - TUE
+      - WED
+      - THU
+      - FRI
+      - SAT
+      - SUN
+    Type: String
+  State:
+    Description: enable or disable solution
+    Default: ENABLED
+    AllowedValues:
+      - ENABLED
+      - DISABLED
+    Type: String
+
+Resources:
+  InstanceRetirementEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Event trigger when an instance need to retirement
+      EventPattern:
+        {
+          'source': [
+            'aws.health'
+          ],
+          'detail-type': [
+            'AWS Health Event'
+          ],
+          'detail': {
+            'service': [
+              'EC2'
+            ],
+            'eventTypeCategory': [
+              'scheduledChange'
+            ],
+            'eventTypeCode': [
+              'AWS_EC2_INSTANCE_RETIREMENT_SCHEDULED'
+            ]
+          }
+        }
+      Name: !Sub ${ProjectPrefix}-InstanceRetirement-EventRule
+      State: !Ref State
+      Targets:
+        -
+          Arn:
+            !GetAtt GetRetirementInstanceFunction.Arn
+          Id: 'GetRetirementInstanceFunction'
+
+  PermissionForEventsToInvokeGetRetirementInstanceFunction:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: GetRetirementInstanceFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: 'events.amazonaws.com'
+      SourceArn: 
+        !GetAtt InstanceRetirementEventRule.Arn
+
+  GetRetirementInstanceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${ProjectPrefix}-Get-Retirement-Instance-Function
+      Code:
+        S3Bucket: 'liamdao-cf'
+        S3Key: 'solutions/instance-retirement-scheduler/get-retirement-instance.zip'
+      Description: Lambda function to get retirement instance and add instance-scheduler tag to
+      Handler: 'lambda_function.lambda_handler'
+      Timeout: 60
+      Role:
+        !GetAtt RoleForGetRetirementInstanceFunction.Arn
+      Runtime: 'python3.8'
+
+  RoleForGetRetirementInstanceFunction:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectPrefix}-Get-Retirement-Instance-Role
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action:
+            - 'sts:AssumeRole'
+      Path: '/'
+      Policies:
+        - PolicyName: !Sub ${ProjectPrefix}-Get-Retirement-Instance-Policy
+          PolicyDocument: 
+            Version: 2012-10-17
+            Statement:
+            - Effect: Allow
+              Action: 
+                - 'ec2:CreateTags'
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+                - 'logs:CreateLogGroup'
+              Resource: 'arn:aws:logs:*:*:*'
+
+  InstanceRetirementSchedulerRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Event trigger when an instance need to retirement
+      ScheduleExpression: !Sub cron(${MaintenanceMinute} ${MaintenanceHour} ? * ${MaintenanceDayOfWeek} *)
+      Name: !Sub ${ProjectPrefix}-InstanceRetirement-SchedulerRule
+      State: !Ref State
+      Targets:
+        -
+          Arn:
+            !GetAtt InstanceRetirementSchedulerFunction.Arn
+          Id: 'InstanceRetirementSchedulerFunction'
+
+  PermissionForEventsToInvokeInstanceRetirementSchedulerFunction:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: InstanceRetirementSchedulerFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: 'events.amazonaws.com'
+      SourceArn: 
+        !GetAtt InstanceRetirementSchedulerRule.Arn
+
+  InstanceRetirementSchedulerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${ProjectPrefix}-Instance-Retirement-Scheduler-Function
+      Code:
+        S3Bucket: 'liamdao-cf'
+        S3Key: 'solutions/instance-retirement-scheduler/instance-retirement-scheduler.zip'
+      Description: Lambda function to automaticaly stop/start retirement instance
+      Handler: 'lambda_function.lambda_handler'
+      Timeout: 600
+      Role:
+        !GetAtt RoleForInstanceRetirementSchedulerFunction.Arn
+      Runtime: 'python3.8'
+      Environment:
+        Variables:
+          sns_topic_arn: !Ref SnsTopic
+
+  RoleForInstanceRetirementSchedulerFunction:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectPrefix}-Instance-Retirement-Scheduler-Role
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action:
+            - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: !Sub ${ProjectPrefix}-Instance-Retirement-Scheduler-Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+            - Effect: Allow
+              Action:
+                - 'ec2:Describe*'
+                - 'ec2:DeleteTags'
+                - 'ec2:StartInstances'
+                - 'ec2:CreateTags'
+                - 'ec2:StopInstances'
+              Resource: '*'
+            - Effect: Allow
+              Action: 
+                - 'sns:Publish'
+              Resource: !Ref SnsTopic
+            - Effect: Allow
+              Action:
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+                - 'logs:CreateLogGroup'
+              Resource: 'arn:aws:logs:*:*:*'
